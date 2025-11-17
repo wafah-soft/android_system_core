@@ -343,10 +343,92 @@ Verity-related kernel parameters:
    - `adb disable-verity`: Disables verity for development
    - Should never be available on production/locked devices
 
+## Relationship with Fastboot
+
+**Important**: dm-verity is a **runtime verification mechanism** that operates on the device during normal operation, not during the flashing process. Fastboot and dm-verity serve different purposes:
+
+### What Fastboot Does
+- **Flashing tool**: Fastboot is used to flash partitions to the device
+- **Partition manipulation**: Can flash boot, system, vendor, vbmeta, and other partitions
+- **Verity control flags**: Can set flags like `--disable-verity` when flashing vbmeta
+  - This modifies the vbmeta partition to disable dm-verity verification
+  - See `fastboot/fastboot.cpp` for implementation
+
+### What dm-verity Does
+- **Runtime verification**: Verifies data integrity while the device is running
+- **Kernel-level**: Operates in the kernel's device-mapper layer
+- **Read-time checks**: Validates blocks as they are read from storage
+
+### Common Misconception
+**You cannot "implement dm-verity" in fastboot protocol**. Here's why:
+
+1. **dm-verity runs on the device**, not on the host computer
+2. **Fastboot runs on the host**, communicating with the bootloader
+3. **The hash tree is pre-computed** and stored in the partition during the build process
+4. **Fastboot only flashes** the partition image (which already contains the hash tree)
+
+### If You Want to Work with dm-verity
+
+#### As a Device Manufacturer
+- **Build System**: Generate hash trees using `avbtool` during image creation
+- **Sign Images**: Use AVB signing to create vbmeta with root hashes
+- **Flash Complete Images**: Use fastboot to flash the signed images
+
+#### As a Developer
+- **Disable verity for development**:
+  ```bash
+  fastboot flashing unlock
+  fastboot flash vbmeta --disable-verity vbmeta.img
+  ```
+- **Re-enable verity**:
+  ```bash
+  fastboot flash vbmeta vbmeta.img  # Without --disable-verity flag
+  fastboot flashing lock
+  ```
+
+#### To Modify Partitions with dm-verity
+You **cannot** simply "read buffer, patch, write back" because:
+1. Any modification breaks the hash tree
+2. The root hash in vbmeta won't match
+3. dm-verity will detect corruption and take action (panic/restart/error)
+
+**Proper approach**:
+1. Generate new partition image with your changes
+2. Build new hash tree using `avbtool`
+3. Sign with your keys to create new vbmeta
+4. Flash both the partition and vbmeta using fastboot
+5. Or disable verity for development (insecure, development only)
+
+### Example: Creating a Signed Image with dm-verity
+
+```bash
+# Add hash tree to partition
+avbtool add_hashtree_footer \
+  --image system.img \
+  --partition_name system \
+  --partition_size $PARTITION_SIZE \
+  --algorithm SHA256_RSA4096 \
+  --key test_key.pem
+
+# Create vbmeta with signatures
+avbtool make_vbmeta_image \
+  --output vbmeta.img \
+  --algorithm SHA256_RSA4096 \
+  --key test_key.pem \
+  --include_descriptors_from_image system.img
+
+# Flash using fastboot
+fastboot flash system system.img
+fastboot flash vbmeta vbmeta.img
+```
+
+For more details on AVB and image signing, see the [Android Verified Boot documentation](https://source.android.com/security/verifiedboot).
+
 ## References
 
 - [Linux Kernel dm-verity Documentation](https://www.kernel.org/doc/html/latest/admin-guide/device-mapper/verity.html)
 - [Android Verified Boot](https://source.android.com/security/verifiedboot)
+- [AVB Tool Documentation](https://android.googlesource.com/platform/external/avb/+/master/README.md)
 - [cryptsetup dm-verity Wiki](https://gitlab.com/cryptsetup/cryptsetup/wikis/DMVerity)
 
 ## Related Files
